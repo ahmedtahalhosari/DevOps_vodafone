@@ -1,0 +1,118 @@
+pipeline{
+    agent{
+        docker {
+            image 'chs/maven-slave:3.6.3-jdk-8'
+            args '-u root -v /var/run/docker.sock:/var/run/docker.sock'
+            label 'DAF-SLAVE'
+        }
+    }
+    environment{
+         sonar_url = "https://swf-sonarqube.com/"
+     }
+    stages{
+        stage("Build MVN"){
+            when {
+                expression { BRANCH_NAME ==~ /(feature.*|devops|develop|release.*|bugfix.*|master|hotfix.*|pull-requests.*)/ }
+            }
+            steps{
+                script{
+                    mvn_goals = branchToConfig(BRANCH_NAME)
+                    withMaven(mavenSettingsConfig: 'jfrog-artifactory', options: [junitPublisher(healthScaleFactor: 1.0), jacocoPublisher(), artifactsPublisher()]) {
+                         sh "mvn -s ${MVN_SETTINGS}  clean ${mvn_goals}  -P docker -U"
+                    }
+                }  
+            }
+        }
+        stage("Sonar scanner"){
+            when {
+                expression { BRANCH_NAME ==~ /(devops|develop|release.*|master|hotfix.*|pull-requests.*)/ }
+            }
+            steps{
+                script{
+                    version=sh(script: 'cat pom.xml  | grep -oPm2 "(?<=<version>)[^<]+" | tail -n 1',  returnStdout: true).trim()
+                    withSonarQubeEnv('SonarQube Server 7.9.1'){
+                        sh "sonar-scanner -Dsonar.host.url=${sonar_url} -Dsonar.branch.name=${BRANCH_NAME} -Dproject.settings=./scripts/sonar-project.properties  -Dsonar.projectVersion=${version}"              
+                    }               
+                }
+            }
+        }
+
+        stage("Quality Gate"){
+            steps{
+                script{
+                    // status is 'PENDING' workaround
+                    sleep 60
+                    timeout(time: 1, unit: 'HOURS') { // Just in case something goes wrong, pipeline will be killed after a timeout
+                        qg = waitForQualityGate() // Reuse taskId previously collected by withSonarQubeEnv
+                        if (qg.status != 'OK') {
+                            error "Pipeline aborted due to quality gate failure: ${qg.status}"
+                        }
+                    }
+                }
+            }
+        }       
+
+        stage("Build Docker Image"){
+            when {
+                expression { BRANCH_NAME ==~ /(devops|develop|release.*|hotfix.*|master)/ }
+            }
+            steps{
+                script{
+                    if ( BRANCH_NAME ==~ /(release.*)/)  {
+                         BRANCH_NAME= 'release' 
+                    }
+                    if ( BRANCH_NAME ==~ /(hotfix.*)/)  {
+                         BRANCH_NAME= 'hotfix' 
+                    }
+                    version=sh(script: 'cat pom.xml  | grep -oPm2 "(?<=<version>)[^<]+" | tail -n 1',  returnStdout: true).trim()
+                    timestamp=sh(script: 'date "+%Y%m%d%H%M%S"',  returnStdout: true).trim()
+                    docker.withRegistry('https://artifactory-jfrog.com', 'registry') {
+					          def image = docker.build("docker-snapshots-local/api-provider:${BRANCH_NAME}-${version}-${timestamp}","-f scripts/Dockerfile .")
+					          image.push()
+                   
+                    }
+                }                
+            }
+        }     
+          stage("Deploy to environment"){
+            when {
+                expression { BRANCH_NAME ==~ /(devops|develop|release.*|master)/ }
+            }
+            steps{
+                script{
+                    namespace=Getnamespace(BRANCH_NAME)
+                    withKubeConfig([credentialsId: 'ccs2-chs-swf-dev-qa-shared', serverUrl: 'https://k8s-eb.domain.cloud/k8s/clusters/c-wdqc7']) {
+                            sh "kubectl set image deployment api-provider  api-provider=artifactory-jfrog.com/chs/api-provider:${BRANCH_NAME}-${version}-${timestamp} --namespace ${namespace}"
+                            sh "kubectl rollout status deployment api-provider --namespace ${namespace} --timeout=5m"
+				   }
+                }
+            }
+        }
+
+
+
+   
+   
+}
+
+def branchToConfig(branch) {
+    if (branch ==~ /(devops|release.*|develop|feature.*|hotfix.*|PR.*|bugfix.*)/)  {
+        return 'package'
+    }
+    else if (branch ==~ /(master)/) {
+        return 'deploy'
+    }
+}
+
+
+def Getnamespace(branch){
+   if (branch ==~ /(devops)/) {
+        return 'project.devops'
+     }
+     if (branch ==~ /(develop)/) {
+        return 'project.dev'
+     }
+     else if (branch ==~ /(release.*)/) {
+        return 'project.test'
+     }
+}
