@@ -18,7 +18,7 @@ pipeline{
                 script{
                     mvn_goals = branchToConfig(BRANCH_NAME)
                     withMaven(mavenSettingsConfig: 'jfrog-artifactory', options: [junitPublisher(healthScaleFactor: 1.0), jacocoPublisher(), artifactsPublisher()]) {
-                         sh "mvn -s ${MVN_SETTINGS}  clean ${mvn_goals}  -P docker -U"
+                         sh "mvn -s ${MVN_SETTINGS}  clean ${mvn_goals} "
                     }
                 }  
             }
