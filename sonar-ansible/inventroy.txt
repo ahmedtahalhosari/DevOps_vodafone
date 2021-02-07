@@ -1,0 +1,2 @@
+server1 ansible_host=server1.company.com ansible_connection=ssh 
+server2 ansible_host=server2.company.com ansible_connection=ssh 
